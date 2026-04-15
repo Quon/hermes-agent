@@ -387,19 +387,26 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if platform == Platform.WEIXIN:
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
 
-    # --- Non-Telegram platforms ---
+    # --- QQBot: supports media files ---
+    if platform == Platform.QQBOT:
+        if media_files and not message.strip():
+            # Media-only send is supported for QQBot
+            pass
+        # Continue to _send_qqbot which handles media_files
+
+    # --- Non-Telegram/Weixin/QQBot platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram; "
+                f"send_message MEDIA delivery is currently only supported for telegram, weixin, and qqbot; "
                 f"target {platform.value} had only media attachments"
             )
         }
     warning = None
-    if media_files:
+    if media_files and platform not in (Platform.TELEGRAM, Platform.WEIXIN, Platform.QQBOT):
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram"
+            "native send_message media delivery is currently only supported for telegram, weixin, and qqbot"
         )
 
     last_result = None
@@ -431,7 +438,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         elif platform == Platform.BLUEBUBBLES:
             result = await _send_bluebubbles(pconfig.extra, chat_id, chunk)
         elif platform == Platform.QQBOT:
-            result = await _send_qqbot(pconfig, chat_id, chunk)
+            result = await _send_qqbot(pconfig, chat_id, chunk, media_files=media_files, thread_id=thread_id)
         else:
             result = {"error": f"Direct sending not yet implemented for {platform.value}"}
 
@@ -1046,15 +1053,20 @@ def _check_send_message():
         return False
 
 
-async def _send_qqbot(pconfig, chat_id, message):
+async def _send_qqbot(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Send via QQBot using the REST API directly (no WebSocket needed).
 
     Uses the QQ Bot Open Platform REST endpoints to get an access token
     and post a message. Works for guild channels without requiring
     a running gateway adapter.
+    
+    Supports both text messages and media files (images, videos, documents).
     """
     try:
         import httpx
+        import base64
+        import mimetypes
+        from pathlib import Path
     except ImportError:
         return _error("QQBot direct send requires httpx. Run: pip install httpx")
 
@@ -1065,8 +1077,10 @@ async def _send_qqbot(pconfig, chat_id, message):
     if not appid or not secret:
         return _error("QQBot: QQ_APP_ID / QQ_CLIENT_SECRET not configured.")
 
+    media_files = media_files or []
+
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             # Step 1: Get access token
             token_resp = await client.post(
                 "https://bots.qq.com/app/getAppAccessToken",
@@ -1079,21 +1093,122 @@ async def _send_qqbot(pconfig, chat_id, message):
             if not access_token:
                 return _error(f"QQBot: no access_token in response")
 
-            # Step 2: Send message via REST
+            # Correct Authorization header format: "QQBot {token}"
             headers = {
-                "Authorization": f"QQBotAccessToken {access_token}",
+                "Authorization": f"QQBot {access_token}",
                 "Content-Type": "application/json",
             }
-            url = f"https://api.sgroup.qq.com/channels/{chat_id}/messages"
-            payload = {"content": message[:4000], "msg_type": 0}
 
-            resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code in (200, 201):
-                data = resp.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
-                        "message_id": data.get("id")}
+            # Determine chat type from chat_id format
+            # Group IDs typically start with "group_" or are numeric
+            is_group = chat_id.startswith("group_") or chat_id.startswith("0x") or chat_id.isdigit()
+            api_base = "https://api.sgroup.qq.com"
+            
+            if is_group:
+                files_endpoint = f"{api_base}/v2/groups/{chat_id}/files"
+                messages_endpoint = f"{api_base}/v2/groups/{chat_id}/messages"
             else:
-                return _error(f"QQBot send failed: {resp.status_code} {resp.text}")
+                files_endpoint = f"{api_base}/v2/users/{chat_id}/files"
+                messages_endpoint = f"{api_base}/v2/users/{chat_id}/messages"
+
+            # Step 2: Send media files first (if any)
+            last_message_id = None
+            for media_path, is_voice in media_files:
+                if not Path(media_path).exists():
+                    return _error(f"Media file not found: {media_path}")
+                
+                # Load file and encode as base64
+                file_data = Path(media_path).read_bytes()
+                file_b64 = base64.b64encode(file_data).decode("ascii")
+                
+                # Determine file type
+                ext = Path(media_path).suffix.lower()
+                content_type = mimetypes.guess_type(media_path)[0] or "application/octet-stream"
+                
+                # QQ Bot file types: 1=image, 2=video, 3=voice, 4=file
+                if "image" in content_type:
+                    file_type = 1
+                elif "video" in content_type:
+                    file_type = 2
+                elif "audio" in content_type or is_voice:
+                    file_type = 3
+                else:
+                    file_type = 4  # generic file
+                
+                # Upload file
+                upload_payload = {
+                    "file_type": file_type,
+                    "file_data": file_b64,
+                    "srv_send_msg": False,
+                }
+                if file_type == 4:  # generic file needs file_name
+                    upload_payload["file_name"] = Path(media_path).name
+                
+                upload_resp = await client.post(
+                    files_endpoint,
+                    json=upload_payload,
+                    headers=headers,
+                    timeout=120,  # File uploads can take longer
+                )
+                if upload_resp.status_code != 200:
+                    return _error(f"QQBot file upload failed: {upload_resp.status_code} {upload_resp.text}")
+                
+                upload_data = upload_resp.json()
+                file_info = upload_data.get("file_info")
+                if not file_info:
+                    return _error(f"QQBot upload response missing file_info: {upload_data}")
+                
+                # Send media message with msg_type=7
+                msg_seq = 1  # Simple sequential number
+                media_payload = {
+                    "msg_type": 7,  # MSG_TYPE_MEDIA
+                    "media": {"file_info": file_info},
+                    "msg_seq": msg_seq,
+                }
+                
+                media_resp = await client.post(
+                    messages_endpoint,
+                    json=media_payload,
+                    headers=headers,
+                )
+                if media_resp.status_code in (200, 201):
+                    last_message_id = media_resp.json().get("id")
+                else:
+                    return _error(f"QQBot media send failed: {media_resp.status_code} {media_resp.text}")
+
+            # Step 3: Send text message (if any)
+            if message.strip():
+                text_payload = {"content": message[:4000], "msg_type": 0}
+                if last_message_id:
+                    text_payload["msg_id"] = last_message_id  # Reply to last media
+                
+                text_resp = await client.post(
+                    messages_endpoint,
+                    json=text_payload,
+                    headers=headers,
+                )
+                if text_resp.status_code in (200, 201):
+                    data = text_resp.json()
+                    return {
+                        "success": True,
+                        "platform": "qqbot",
+                        "chat_id": chat_id,
+                        "message_id": data.get("id"),
+                    }
+                else:
+                    return _error(f"QQBot send failed: {text_resp.status_code} {text_resp.text}")
+            
+            # Only media was sent
+            if last_message_id:
+                return {
+                    "success": True,
+                    "platform": "qqbot",
+                    "chat_id": chat_id,
+                    "message_id": last_message_id,
+                }
+            
+            return {"success": False, "error": "No content to send"}
+            
     except Exception as e:
         return _error(f"QQBot send failed: {e}")
 
