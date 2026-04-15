@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Timeouts
 _QUERY_TIMEOUT = 10   # brv query — should be fast
-_CURATE_TIMEOUT = 120  # brv curate — may involve LLM processing
+_CURATE_TIMEOUT = 180  # brv curate — may involve LLM processing (increased from 120s)
 
 # Minimum lengths to filter noise
 _MIN_QUERY_LEN = 10
