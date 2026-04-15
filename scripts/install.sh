@@ -6,7 +6,7 @@
 # Uses uv for desktop/server installs and Python's stdlib venv + pip on Termux.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Quon/hermes-agent/main/scripts/install.sh | bash
 #
 # Or with options:
 #   curl -fsSL ... | bash -s -- --no-venv --skip-setup
@@ -26,8 +26,8 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-REPO_URL_SSH="git@github.com:NousResearch/hermes-agent.git"
-REPO_URL_HTTPS="https://github.com/NousResearch/hermes-agent.git"
+REPO_URL_SSH="git@github.com:Quon/hermes-agent.git"
+REPO_URL_HTTPS="https://github.com/Quon/hermes-agent.git"
 HERMES_HOME="$HOME/.hermes"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-$HERMES_HOME/hermes-agent}"
 PYTHON_VERSION="3.11"
@@ -811,10 +811,10 @@ install_deps() {
             log_info "Using ANDROID_API_LEVEL=$ANDROID_API_LEVEL for Android wheel builds"
         fi
 
-        "$PIP_PYTHON" -m pip install --upgrade pip setuptools wheel >/dev/null
-        if ! "$PIP_PYTHON" -m pip install -e '.[termux]' -c constraints-termux.txt; then
+        "$PIP_PYTHON" -m pip install --upgrade pip setuptools wheel -i https://mirrors.aliyun.com/pypi/simple >/dev/null
+        if ! "$PIP_PYTHON" -m pip install -e '.[termux]' -c constraints-termux.txt -i https://mirrors.aliyun.com/pypi/simple; then
             log_warn "Termux feature install (.[termux]) failed, trying base install..."
-            if ! "$PIP_PYTHON" -m pip install -e '.' -c constraints-termux.txt; then
+            if ! "$PIP_PYTHON" -m pip install -e '.' -c constraints-termux.txt -i https://mirrors.aliyun.com/pypi/simple; then
                 log_error "Package installation failed on Termux."
                 log_info "Ensure these packages are installed: pkg install clang rust make pkg-config libffi openssl"
                 log_info "Then re-run: cd $INSTALL_DIR && python -m pip install -e '.[termux]' -c constraints-termux.txt"
@@ -872,11 +872,11 @@ install_deps() {
     # Install the main package in editable mode with all extras.
     # Try [all] first, fall back to base install if extras have issues.
     ALL_INSTALL_LOG=$(mktemp)
-    if ! $UV_CMD pip install -e ".[all]" 2>"$ALL_INSTALL_LOG"; then
+    if ! $UV_CMD pip install -e ".[all]" -i https://mirrors.aliyun.com/pypi/simple 2>"$ALL_INSTALL_LOG"; then
         log_warn "Full install (.[all]) failed, trying base install..."
         log_info "Reason: $(tail -5 "$ALL_INSTALL_LOG" | head -3)"
         rm -f "$ALL_INSTALL_LOG"
-        if ! $UV_CMD pip install -e "."; then
+        if ! $UV_CMD pip install -e "." -i https://mirrors.aliyun.com/pypi/simple; then
             log_error "Package installation failed."
             log_info "Check that build tools are installed: sudo apt install build-essential python3-dev"
             log_info "Then re-run: cd $INSTALL_DIR && uv pip install -e '.[all]'"
@@ -1094,7 +1094,7 @@ install_node_deps() {
     if [ -f "$INSTALL_DIR/package.json" ]; then
         log_info "Installing Node.js dependencies (browser tools)..."
         cd "$INSTALL_DIR"
-        npm install --silent 2>/dev/null || {
+        npm install --silent --registry=https://registry.npmmirror.com 2>/dev/null || {
             log_warn "npm install failed (browser tools may not work)"
         }
         log_success "Node.js dependencies installed"
@@ -1162,7 +1162,7 @@ install_node_deps() {
     if [ -f "$INSTALL_DIR/scripts/whatsapp-bridge/package.json" ]; then
         log_info "Installing WhatsApp bridge dependencies..."
         cd "$INSTALL_DIR/scripts/whatsapp-bridge"
-        npm install --silent 2>/dev/null || {
+        npm install --silent --registry=https://registry.npmmirror.com 2>/dev/null || {
             log_warn "WhatsApp bridge npm install failed (WhatsApp may not work)"
         }
         log_success "WhatsApp bridge dependencies installed"
