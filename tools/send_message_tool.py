@@ -415,15 +415,15 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, weixin, and qqbot; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, weixin and qqbot; "
                 f"target {platform.value} had only media attachments"
             )
         }
     warning = None
-    if media_files and platform not in (Platform.TELEGRAM, Platform.WEIXIN, Platform.QQBOT):
+    if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, weixin, and qqbot"
+            "native send_message media delivery is currently only supported for telegram, discord, weixin and qqbot"
         )
 
     last_result = None
@@ -1239,8 +1239,8 @@ async def _send_qqbot(pconfig, chat_id, message, media_files=None, thread_id=Non
             # Step 3: Send text message (if any)
             if message.strip():
                 text_payload = {"content": message[:4000], "msg_type": 0}
-                if last_message_id:
-                    text_payload["msg_id"] = last_message_id  # Reply to last media
+                # Note: We don't use msg_id here because QQ Bot API only allows
+                # replying to user messages, not bot's own messages
                 
                 text_resp = await client.post(
                     messages_endpoint,
