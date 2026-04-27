@@ -88,13 +88,13 @@ class TestCopyReasoningContentForApi:
         agent._copy_reasoning_content_for_api(source, api_msg)
         assert api_msg.get("reasoning_content") == ""
 
-    def test_deepseek_assistant_no_tool_call_skipped(self) -> None:
-        """Plain assistant turns without tool_calls do NOT get padding — only tool-call messages need it."""
+    def test_deepseek_assistant_no_tool_call_gets_padding(self) -> None:
+        """ALL assistant messages get reasoning_content padding on DeepSeek — not just tool-call ones."""
         agent = _make_agent(provider="deepseek", model="deepseek-v4-flash")
         source = {"role": "assistant", "content": "hello"}
         api_msg: dict = {}
         agent._copy_reasoning_content_for_api(source, api_msg)
-        assert "reasoning_content" not in api_msg
+        assert api_msg.get("reasoning_content") == ""
 
     def test_deepseek_explicit_reasoning_content_preserved(self) -> None:
         """When reasoning_content is already set, it's copied verbatim."""

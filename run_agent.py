@@ -7625,14 +7625,25 @@ class AIAgent:
             raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
             if raw_reasoning_content is not None:
                 msg["reasoning_content"] = _sanitize_surrogates(raw_reasoning_content)
-            elif msg.get("tool_calls") and (
+            elif (
                 self._needs_deepseek_tool_reasoning() or self._needs_kimi_tool_reasoning()
             ):
                 # DeepSeek thinking mode and Kimi/Moonshot both require
-                # reasoning_content on assistant messages with tool_calls.
-                # Without it, replaying the persisted message causes HTTP 400.
+                # reasoning_content on EVERY assistant message — not just
+                # tool-call ones.  A plain text assistant response without
+                # reasoning_content will cause HTTP 400 on the next API call
+                # when replayed in the conversation history (#15250/#15353).
                 # Include empty string as a defensive compatibility fallback.
                 msg["reasoning_content"] = ""
+
+        # Fallback: DeepSeek/Kimi require reasoning_content on EVERY assistant
+        # message. If the response object didn't expose the attribute at all
+        # (e.g., proxy provider stripping it), add it unconditionally so
+        # persisted messages don't poison future API calls (#15250/#15353).
+        if "reasoning_content" not in msg and (
+            self._needs_deepseek_tool_reasoning() or self._needs_kimi_tool_reasoning()
+        ):
+            msg["reasoning_content"] = ""
 
         if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
             # Pass reasoning_details back unmodified so providers (OpenRouter,
@@ -7753,9 +7764,10 @@ class AIAgent:
             return
 
         # DeepSeek thinking mode and Kimi/Moonshot both require
-        # reasoning_content on assistant messages with tool_calls.
-        # Without it, replaying the conversation history causes HTTP 400.
-        if source_msg.get("tool_calls") and (
+        # reasoning_content on EVERY assistant message — not just
+        # tool-call ones.  Without it, replaying the conversation
+        # history causes HTTP 400 (#15250/#15353).
+        if (
             self._needs_deepseek_tool_reasoning() or self._needs_kimi_tool_reasoning()
         ):
             api_msg["reasoning_content"] = ""
