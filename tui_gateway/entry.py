@@ -12,6 +12,7 @@ if _src_root and _src_root not in sys.path:
 sys.path = [p for p in sys.path if p not in {"", "."}]
 
 import json
+import select
 import signal
 import time
 import traceback
@@ -224,25 +225,55 @@ def main():
         _log_exit("startup write failed (broken stdout pipe before first event)")
         sys.exit(0)
 
-    for raw in sys.stdin:
-        line = raw.strip()
-        if not line:
-            continue
+    # Use select.poll() to read stdin with a 1-second timeout.
+    # On WSL, Node.js may briefly close the stdin pipe during child-process
+    # GC cleanup; with `for raw in sys.stdin:` the process exits as soon as
+    # the pipe is closed, before in-flight agent responses can be delivered.
+    # The select-based loop detects EOF but does NOT exit — it keeps the
+    # process alive so background threads (agent loop, tool execution) can
+    # drain their output to the TUI.  SIGTERM from the TUI (gw.kill() in
+    # die()) is the only exit path once stdin is gone.
+    fd = sys.stdin.fileno()
+    poll = select.poll()
+    poll.register(fd, select.POLLIN)
+    POLL_TIMEOUT_MS = 1000
 
-        try:
-            req = json.loads(line)
-        except json.JSONDecodeError:
-            if not write_json({"jsonrpc": "2.0", "error": {"code": -32700, "message": "parse error"}, "id": None}):
-                _log_exit("parse-error-response write failed (broken stdout pipe)")
-                sys.exit(0)
-            continue
+    while True:
+        events = poll.poll(POLL_TIMEOUT_MS)
+        if events:
+            raw = sys.stdin.readline()
+            if not raw:
+                _log_exit("stdin EOF (TUI closed the command pipe)")
+                # Keep the process alive briefly so in-flight agent
+                # responses can be delivered.  On WSL, Node.js may
+                # briefly close the stdin pipe during child-process
+                # GC cleanup; on all platforms, this gives background
+                # thread-pool tasks (agent loop, tool execution) time
+                # to drain their output before we go away.
+                # The TUI will SIGTERM us via gw.kill() in die()
+                # during normal shutdown, so this sleep is a max
+                # timeout rather than a required wait.
+                time.sleep(30)
+                break
 
-        method = req.get("method") if isinstance(req, dict) else None
-        resp = dispatch(req)
-        if resp is not None:
-            if not write_json(resp):
-                _log_exit(f"response write failed for method={method!r} (broken stdout pipe)")
-                sys.exit(0)
+            line = raw.strip()
+            if not line:
+                continue
+
+            try:
+                req = json.loads(line)
+            except json.JSONDecodeError:
+                if not write_json({"jsonrpc": "2.0", "error": {"code": -32700, "message": "parse error"}, "id": None}):
+                    _log_exit("parse-error-response write failed (broken stdout pipe)")
+                    sys.exit(0)
+                continue
+
+            method = req.get("method") if isinstance(req, dict) else None
+            resp = dispatch(req)
+            if resp is not None:
+                if not write_json(resp):
+                    _log_exit(f"response write failed for method={method!r} (broken stdout pipe)")
+                    sys.exit(0)
 
     _log_exit("stdin EOF (TUI closed the command pipe)")
 
