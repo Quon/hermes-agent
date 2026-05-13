@@ -9639,6 +9639,11 @@ class AIAgent:
             opts = self._lmstudio_reasoning_options_cached()
             # "off-only" (or absent) means no real reasoning capability.
             return any(opt and opt != "off" for opt in opts)
+        # opencode-go/zen + DeepSeek models support reasoning via DeepSeek
+        # API format (top-level reasoning_effort + extra_body.thinking).
+        if (self.provider or "").strip().lower() in {"opencode-go", "opencode-zen"}:
+            if (self.model or "").lower().startswith("deepseek"):
+                return True
         if "openrouter" not in self._base_url_lower:
             return False
         if "api.mistral.ai" in self._base_url_lower:
@@ -9735,6 +9740,36 @@ class AIAgent:
                 requested_effort = supported_efforts[0]
 
         return {"effort": requested_effort}
+
+    def _deepseek_reasoning_params(
+        self,
+    ) -> tuple[str | None, dict | None]:
+        """Map Hermes reasoning_config to DeepSeek native API format.
+
+        Returns (top_level_reasoning_effort, extra_body_thinking).
+          - reasoning_effort: None (don't send) or "high"/"max"
+          - thinking: None (don't send) or {"type": "enabled"/"disabled"}
+
+        DeepSeek's thinking mode uses top-level ``reasoning_effort``
+        (``high`` for normal, ``max`` for complex agent workflows) and
+        ``extra_body.thinking`` as the toggle.  Hermes effort mapping:
+          - minimal/low/medium/high -> ``high``
+          - xhigh -> ``max``
+          - none -> disabled
+        ``reasoning_config`` is None -> return (None, None) (no override).
+        """
+        rc = self.reasoning_config
+        if rc is None or not isinstance(rc, dict):
+            return None, None
+        if rc.get("enabled") is False:
+            return None, {"type": "disabled"}
+        effort = str(rc.get("effort", "medium") or "medium").strip().lower()
+        if effort == "xhigh":
+            return "max", {"type": "enabled"}
+        if effort == "none":
+            return None, {"type": "disabled"}
+        # minimal/low/medium/high all map to DeepSeek's "high"
+        return "high", {"type": "enabled"}
 
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
         """Build a normalized assistant message dict from an API response message.
@@ -11467,14 +11502,31 @@ class AIAgent:
                 self._resolve_lmstudio_summary_reasoning_effort()
                 if _is_lmstudio_summary else None
             )
+            # Pre-resolve DeepSeek reasoning params so the extra_body block
+            # below and the top-level kwarg insertion share one resolution.
+            _is_deepseek_summary = (
+                not _is_lmstudio_summary
+                and self._supports_reasoning_extra_body()
+                and (self.model or "").lower().startswith("deepseek")
+            )
+            _ds_reasoning_effort: str | None = None
+            _ds_thinking: dict | None = None
+            if _is_deepseek_summary:
+                _ds_reasoning_effort, _ds_thinking = (
+                    self._deepseek_reasoning_params()
+                )
             if not _is_lmstudio_summary and self._supports_reasoning_extra_body():
-                if self.reasoning_config is not None:
-                    summary_extra_body["reasoning"] = self.reasoning_config
+                if _is_deepseek_summary:
+                    if _ds_thinking is not None:
+                        summary_extra_body["thinking"] = _ds_thinking
                 else:
-                    summary_extra_body["reasoning"] = {
-                        "enabled": True,
-                        "effort": "medium"
-                    }
+                    if self.reasoning_config is not None:
+                        summary_extra_body["reasoning"] = self.reasoning_config
+                    else:
+                        summary_extra_body["reasoning"] = {
+                            "enabled": True,
+                            "effort": "medium"
+                        }
             if _is_nous:
                 summary_extra_body["tags"] = ["product=hermes-agent"]
 
@@ -11496,6 +11548,8 @@ class AIAgent:
                     summary_kwargs.update(self._max_tokens_param(self.max_tokens))
                 if _lm_reasoning_effort is not None:
                     summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
+                if _ds_reasoning_effort is not None:
+                    summary_kwargs["reasoning_effort"] = _ds_reasoning_effort
 
                 # Include provider routing preferences
                 provider_preferences = {}

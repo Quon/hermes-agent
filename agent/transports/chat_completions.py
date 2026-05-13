@@ -487,6 +487,33 @@ class ChatCompletionsTransport(ProviderTransport):
         if extra_body_from_profile:
             extra_body.update(extra_body_from_profile)
 
+        # DeepSeek reasoning fallback: when the profile doesn't handle
+        # reasoning for a DeepSeek model (e.g. opencode-go), send
+        # DeepSeek-native format params: top-level reasoning_effort
+        # (high/max) + extra_body.thinking (enabled/disabled).
+        _model_low = (model or "").lower()
+        if (
+            _model_low.startswith("deepseek")
+            and params.get("supports_reasoning", False)
+            and "reasoning_effort" not in api_kwargs
+            and "thinking" not in extra_body
+        ):
+            _ds_thinking_off = bool(
+                reasoning_config
+                and isinstance(reasoning_config, dict)
+                and reasoning_config.get("enabled") is False
+            )
+            _ds_effort = "high"
+            if reasoning_config and isinstance(reasoning_config, dict):
+                _e = (reasoning_config.get("effort") or "").strip().lower()
+                if _e == "xhigh":
+                    _ds_effort = "max"
+            if not _ds_thinking_off:
+                api_kwargs["reasoning_effort"] = _ds_effort
+            extra_body["thinking"] = {
+                "type": "disabled" if _ds_thinking_off else "enabled",
+            }
+
         # Merge any pre-built extra_body additions from the caller
         additions = params.get("extra_body_additions")
         if additions:
